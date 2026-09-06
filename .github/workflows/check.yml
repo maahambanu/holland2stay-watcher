@@ -1,0 +1,41 @@
+name: Check Holland2Stay Rotterdam studios
+
+on:
+  schedule:
+    # GitHub's minimum cron granularity is 5 minutes, and under load
+    # actual runs can lag a few minutes behind schedule.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}   # lets you trigger a manual run from the Actions tab
+
+permissions:
+  contents: write   # needed so the workflow can commit the updated state file
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run checker
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GMAIL_TO: ${{ secrets.GMAIL_TO }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python check_listings.py
+
+      - name: Commit updated state (if changed)
+        run: |
+          git config user.name "h2s-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state/seen.json
+          git diff --cached --quiet || git commit -m "Update seen listings [skip ci]"
+          git push
