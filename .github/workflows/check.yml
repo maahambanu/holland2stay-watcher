@@ -13,6 +13,11 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports:
+          - 8191:8191
     steps:
       - uses: actions/checkout@v4
 
@@ -23,20 +28,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}
-
-      - name: Install Playwright's Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: playwright install --with-deps chromium
-
-      - name: Install Playwright's OS dependencies (cache hit case)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: playwright install-deps chromium
+      - name: Wait for FlareSolverr to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8191/health > /dev/null; then
+              echo "FlareSolverr is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "FlareSolverr never became ready" >&2
+          exit 1
 
       - name: Run checker
         env:

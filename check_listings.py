@@ -12,13 +12,20 @@ IMPORTANT — READ THIS FIRST:
 The listings page itself is public — no login needed to browse and see
 booking status. You log in manually and book once you get the alert.
 
-Cloudflare blocks this even with a browser-fingerprint-spoofing HTTP
-client (curl_cffi) — it's running an actual JS challenge, so fetching
-uses Playwright (a real headless Chromium browser) instead. This is
-heavier than a plain HTTP request, which is why the GitHub Actions
-workflow caches the browser binary and why I'd recommend making the
-repo public (unlimited free Actions minutes) rather than private
-(2,000 min/month cap) at a 5-minute polling interval.
+Cloudflare here shows an interactive Turnstile challenge that neither
+a fingerprint-spoofing HTTP client (curl_cffi) nor a plain headless
+browser (Playwright) got past. So fetching goes through FlareSolverr —
+a small proxy (run as its own container in the GitHub Actions workflow)
+that uses a specially patched browser internally to solve Cloudflare
+challenges. This script just makes a plain HTTP call to FlareSolverr's
+local API and gets back the real page HTML.
+
+If FlareSolverr still can't get past this specific Turnstile challenge
+(it isn't guaranteed to — Turnstile is designed to resist exactly this),
+the realistic remaining options are a tiny-cost CAPTCHA-solving service,
+or running the checker from your own logged-in browser instead (not
+fully autonomous, but 100% free and very reliable). Let me know which
+you'd want if this doesn't work.
 
 The CSS selectors below are my best guess based on public info about
 the site's structure — I could not load the real listings page from
@@ -35,10 +42,12 @@ import json
 import sys
 from pathlib import Path
 
-import requests  # used for Gmail/Telegram calls only
+import requests
 from bs4 import BeautifulSoup
 
 STATE_PATH = Path(__file__).parent / "state" / "seen.json"
+
+FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "http://localhost:8191/v1")
 
 # The page that lists Rotterdam residences. Adjust if Holland2Stay's
 # actual filter URL differs — check the address bar when you filter
@@ -62,45 +71,36 @@ WATCHED_STREETS = ["galvanistraat"]
 
 
 def fetch_html() -> str:
-    """Fetch the listings page with a real headless browser, since
-    Cloudflare here runs a JS challenge that only resolves when JS
-    actually executes (curl_cffi's fingerprint-spoofing wasn't enough)."""
-    from playwright.sync_api import sync_playwright
+    """Ask FlareSolverr (running as a sibling container in the workflow) to
+    load the page and solve any Cloudflare challenge, then return the real
+    HTML it got back."""
+    payload = {
+        "cmd": "request.get",
+        "url": LISTINGS_URL,
+        "maxTimeout": 60000,
+    }
+    resp = requests.post(FLARESOLVERR_URL, json=payload, timeout=70)
+    resp.raise_for_status()
+    data = resp.json()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-        )
-        # Hide the most obvious automation flag before any page script runs
-        context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-        )
-        page = context.new_page()
+    if data.get("status") != "ok":
+        raise RuntimeError(f"FlareSolverr failed: {data.get('message')}")
 
-        response = page.goto(LISTINGS_URL, wait_until="domcontentloaded", timeout=60000)
-        # Cloudflare's JS challenge needs a few seconds to resolve and redirect
-        page.wait_for_timeout(6000)
-        html = page.content()
-        status = response.status if response else None
-        browser.close()
-
-    lowered = html.lower()
-    if status == 403 or "just a moment" in lowered or "checking your browser" in lowered:
+    solution = data.get("solution", {})
+    if solution.get("status") != 200:
         raise RuntimeError(
-            "Still blocked by Cloudflare even with a real headless browser. "
-            "This likely means Cloudflare is showing an interactive Turnstile "
-            "challenge (a checkbox), which needs a challenge-solving proxy "
-            "like FlareSolverr or a paid CAPTCHA-solving service. Let me know "
-            "and I'll wire one of those in."
+            f"FlareSolverr got HTTP {solution.get('status')} from Holland2Stay."
+        )
+
+    html = solution.get("response", "")
+    lowered = html.lower()
+    if "just a moment" in lowered or "checking your browser" in lowered:
+        raise RuntimeError(
+            "FlareSolverr returned what still looks like a Cloudflare "
+            "challenge page — this Turnstile challenge likely isn't being "
+            "auto-solved. At this point the realistic remaining options are "
+            "a tiny-cost CAPTCHA-solving service, or running the checker "
+            "from your own logged-in browser instead."
         )
     return html
 
