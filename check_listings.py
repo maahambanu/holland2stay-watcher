@@ -9,16 +9,20 @@ And notifies (Gmail + Telegram) on anything new, flagging whether it's
 "Direct Booking" (act now!) or "Lottery" (weekly, less urgent).
 
 IMPORTANT — READ THIS FIRST:
-The listings page itself is public — no login needed to browse and see
-booking status. You log in manually and book once you get the alert.
+Turns out /residences (the actual filtered listing with prices/status)
+shows a "Sign in or register" wall to anyone not logged in — confirmed
+by an earlier run coming back with 0 cards parsed. So this DOES need
+your login session, passed in as a cookie (see README "Getting your
+session cookie") alongside FlareSolverr solving the Cloudflare
+challenge.
 
 Cloudflare here shows an interactive Turnstile challenge that neither
 a fingerprint-spoofing HTTP client (curl_cffi) nor a plain headless
-browser (Playwright) got past. So fetching goes through FlareSolverr —
-a small proxy (run as its own container in the GitHub Actions workflow)
-that uses a specially patched browser internally to solve Cloudflare
-challenges. This script just makes a plain HTTP call to FlareSolverr's
-local API and gets back the real page HTML.
+browser (Playwright) got past on their own. So fetching goes through
+FlareSolverr — a small proxy (run as its own container in the GitHub
+Actions workflow) that uses a specially patched browser internally to
+solve Cloudflare challenges, while also passing your session cookie
+through so the actual listings render instead of the sign-in page.
 
 If FlareSolverr still can't get past this specific Turnstile challenge
 (it isn't guaranteed to — Turnstile is designed to resist exactly this),
@@ -28,12 +32,13 @@ fully autonomous, but 100% free and very reliable). Let me know which
 you'd want if this doesn't work.
 
 The CSS selectors below are my best guess based on public info about
-the site's structure — I could not load the real listings page from
-here to confirm the exact markup (no network access to
-holland2stay.com from this sandboxed environment). You will likely
-need to adjust `parse_listings()` once, using your browser's DevTools
-(see README "Finding the right selectors"). Everything else (diffing,
-state, Gmail, Telegram, the GitHub Action) is ready to go as-is.
+the site's structure — I could not load the real, logged-in listings
+page from here to confirm the exact markup (no network access to
+holland2stay.com from this sandboxed environment, and it needs login
+besides). You will likely need to adjust `parse_listings()` once, using
+your browser's DevTools (see README "Finding the right selectors").
+Everything else (diffing, state, Gmail, Telegram, the GitHub Action)
+is ready to go as-is.
 """
 
 import os
@@ -49,10 +54,10 @@ STATE_PATH = Path(__file__).parent / "state" / "seen.json"
 
 FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "http://localhost:8191/v1")
 
-# The page that lists Rotterdam residences. Adjust if Holland2Stay's
-# actual filter URL differs — check the address bar when you filter
-# to Rotterdam on the site yourself.
-LISTINGS_URL = "https://www.holland2stay.com/residences?city=rotterdam"
+# The page that lists Rotterdam residences, using the actual query format
+# the site uses (confirmed via search — the earlier ?city=rotterdam guess
+# was wrong).
+LISTINGS_URL = "https://www.holland2stay.com/residences?page=1&city%5Bfilter%5D=Rotterdam,25"
 
 TARGET_CITY = "rotterdam"
 TARGET_TYPE = "studio"
@@ -70,15 +75,38 @@ EXCLUDE_BADGE_TEXT = "short-stay"
 WATCHED_STREETS = ["galvanistraat"]
 
 
+def parse_cookie_header(header: str):
+    """Turn a raw 'name=value; name2=value2' cookie header (copied straight
+    from your browser's DevTools) into the list-of-dicts format FlareSolverr
+    expects."""
+    cookies = []
+    for part in header.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        cookies.append({
+            "name": name.strip(),
+            "value": value.strip(),
+            "domain": ".holland2stay.com",
+        })
+    return cookies
+
+
 def fetch_html() -> str:
     """Ask FlareSolverr (running as a sibling container in the workflow) to
-    load the page and solve any Cloudflare challenge, then return the real
-    HTML it got back."""
+    load the page — carrying your login cookie — and solve any Cloudflare
+    challenge, then return the real HTML it got back."""
     payload = {
         "cmd": "request.get",
         "url": LISTINGS_URL,
         "maxTimeout": 60000,
     }
+
+    cookie_header = os.environ.get("H2S_COOKIE", "").strip()
+    if cookie_header:
+        payload["cookies"] = parse_cookie_header(cookie_header)
+
     resp = requests.post(FLARESOLVERR_URL, json=payload, timeout=70)
     resp.raise_for_status()
     data = resp.json()
@@ -94,6 +122,7 @@ def fetch_html() -> str:
 
     html = solution.get("response", "")
     lowered = html.lower()
+
     if "just a moment" in lowered or "checking your browser" in lowered:
         raise RuntimeError(
             "FlareSolverr returned what still looks like a Cloudflare "
@@ -102,6 +131,14 @@ def fetch_html() -> str:
             "a tiny-cost CAPTCHA-solving service, or running the checker "
             "from your own logged-in browser instead."
         )
+
+    if "sign in or register" in lowered or "please enter your details to sign in" in lowered:
+        raise RuntimeError(
+            "Got the sign-in page instead of listings — H2S_COOKIE is "
+            "missing, empty, or expired. Re-grab your session cookie from "
+            "DevTools (see README) and update the GitHub secret."
+        )
+
     return html
 
 
