@@ -117,11 +117,21 @@ def fetch_html() -> str:
     )
 
     resp = requests.post(FLARESOLVERR_URL, json=payload, timeout=70)
-    resp.raise_for_status()
-    data = resp.json()
+
+    # Read the body before checking status — FlareSolverr returns a JSON
+    # body with a specific "message" describing what went wrong even on a
+    # 500, and that detail is exactly what we need to diagnose a failure
+    # instead of just seeing a generic "500 Server Error".
+    try:
+        data = resp.json()
+    except ValueError:
+        resp.raise_for_status()
+        raise RuntimeError(f"Unexpected non-JSON response (HTTP {resp.status_code})")
 
     if data.get("status") != "ok":
-        raise RuntimeError(f"FlareSolverr failed: {data.get('message')}")
+        raise RuntimeError(
+            f"FlareSolverr failed (HTTP {resp.status_code}): {data.get('message')}"
+        )
 
     solution = data.get("solution", {})
     if solution.get("status") != 200:
