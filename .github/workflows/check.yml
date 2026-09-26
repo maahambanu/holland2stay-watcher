@@ -42,6 +42,7 @@ jobs:
 
       - name: Run checker
         env:
+          H2S_COOKIE: ${{ secrets.H2S_COOKIE }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           GMAIL_TO: ${{ secrets.GMAIL_TO }}
