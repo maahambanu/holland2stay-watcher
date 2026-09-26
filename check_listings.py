@@ -150,6 +150,7 @@ def fetch_html() -> str:
 
     return html
 
+
 def parse_listings(html: str):
     """
     Returns a list of dicts:
