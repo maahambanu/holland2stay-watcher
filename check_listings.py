@@ -158,6 +158,16 @@ def fetch_html() -> str:
                     f"FlareSolverr failed seeding cookies (HTTP {seed_resp.status_code}): "
                     f"{seed_data.get('message')}"
                 )
+            # Diagnostic — does the homepage itself already look logged-out
+            # right after we injected the cookie? If yes, the cookie is
+            # being rejected immediately (expired/invalid/IP-bound), rather
+            # than something breaking between the seed call and the real
+            # fetch.
+            seed_html = seed_data.get("solution", {}).get("response", "").lower()
+            seed_logged_in = not (
+                "sign in" in seed_html or "log in" in seed_html and "log out" not in seed_html
+            )
+            print(f"Seed page looks logged in: {seed_logged_in}", file=sys.stderr)
 
         payload = {
             "cmd": "request.get",
@@ -215,6 +225,7 @@ def fetch_html() -> str:
         )
 
     return html
+
 
 def parse_listings(html: str):
     """
