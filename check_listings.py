@@ -98,20 +98,40 @@ def parse_cookie_header(header: str):
     return cookies
 
 
+def create_session() -> str:
+    """Start a persistent FlareSolverr browser session so we can seed
+    cookies in one call and use them in a follow-up call, guaranteeing the
+    cookies are actually applied before we fetch the real page (a single
+    combined call was returning the pre-login page)."""
+    resp = requests.post(FLARESOLVERR_URL, json={"cmd": "sessions.create"}, timeout=30)
+    data = resp.json()
+    if data.get("status") != "ok":
+        raise RuntimeError(f"Could not create FlareSolverr session: {data.get('message')}")
+    return data["session"]
+
+
+def destroy_session(session_id: str):
+    try:
+        requests.post(
+            FLARESOLVERR_URL,
+            json={"cmd": "sessions.destroy", "session": session_id},
+            timeout=30,
+        )
+    except Exception:
+        pass  # best-effort cleanup — not worth failing the run over
+
+
 def fetch_html() -> str:
     """Ask FlareSolverr (running as a sibling container in the workflow) to
     load the page — carrying your login cookie — and solve any Cloudflare
-    challenge, then return the real HTML it got back."""
-    payload = {
-        "cmd": "request.get",
-        "url": LISTINGS_URL,
-        "maxTimeout": 60000,
-    }
+    challenge, then return the real HTML it got back.
 
+    Uses a persistent session and two calls: one to land on the site with
+    cookies attached (seeding the browser's cookie jar), a second to
+    actually fetch the listings page using that now-authenticated session.
+    """
     cookie_header = os.environ.get("H2S_COOKIE", "").strip()
     parsed_cookies = parse_cookie_header(cookie_header) if cookie_header else []
-    if parsed_cookies:
-        payload["cookies"] = parsed_cookies
     # Diagnostic — visible in the "Run checker" log, not sent anywhere:
     # confirms whether the secret is even reaching the script and being
     # parsed, before we worry about whether Holland2Stay accepts it.
@@ -121,30 +141,57 @@ def fetch_html() -> str:
         file=sys.stderr,
     )
 
-    resp = requests.post(FLARESOLVERR_URL, json=payload, timeout=70)
-
-    # Read the body before checking status — FlareSolverr returns a JSON
-    # body with a specific "message" describing what went wrong even on a
-    # 500, and that detail is exactly what we need to diagnose a failure
-    # instead of just seeing a generic "500 Server Error".
+    session_id = create_session()
     try:
-        data = resp.json()
-    except ValueError:
-        resp.raise_for_status()
-        raise RuntimeError(f"Unexpected non-JSON response (HTTP {resp.status_code})")
+        if parsed_cookies:
+            seed_payload = {
+                "cmd": "request.get",
+                "url": "https://www.holland2stay.com/",
+                "cookies": parsed_cookies,
+                "session": session_id,
+                "maxTimeout": 60000,
+            }
+            seed_resp = requests.post(FLARESOLVERR_URL, json=seed_payload, timeout=70)
+            seed_data = seed_resp.json()
+            if seed_data.get("status") != "ok":
+                raise RuntimeError(
+                    f"FlareSolverr failed seeding cookies (HTTP {seed_resp.status_code}): "
+                    f"{seed_data.get('message')}"
+                )
 
-    if data.get("status") != "ok":
-        raise RuntimeError(
-            f"FlareSolverr failed (HTTP {resp.status_code}): {data.get('message')}"
-        )
+        payload = {
+            "cmd": "request.get",
+            "url": LISTINGS_URL,
+            "session": session_id,
+            "maxTimeout": 60000,
+        }
+        resp = requests.post(FLARESOLVERR_URL, json=payload, timeout=70)
 
-    solution = data.get("solution", {})
-    if solution.get("status") != 200:
-        raise RuntimeError(
-            f"FlareSolverr got HTTP {solution.get('status')} from Holland2Stay."
-        )
+        # Read the body before checking status — FlareSolverr returns a JSON
+        # body with a specific "message" describing what went wrong even on
+        # a 500, and that detail is what we need to diagnose a failure
+        # instead of just seeing a generic "500 Server Error".
+        try:
+            data = resp.json()
+        except ValueError:
+            resp.raise_for_status()
+            raise RuntimeError(f"Unexpected non-JSON response (HTTP {resp.status_code})")
 
-    html = solution.get("response", "")
+        if data.get("status") != "ok":
+            raise RuntimeError(
+                f"FlareSolverr failed (HTTP {resp.status_code}): {data.get('message')}"
+            )
+
+        solution = data.get("solution", {})
+        if solution.get("status") != 200:
+            raise RuntimeError(
+                f"FlareSolverr got HTTP {solution.get('status')} from Holland2Stay."
+            )
+
+        html = solution.get("response", "")
+    finally:
+        destroy_session(session_id)
+
     lowered = html.lower()
 
     if "just a moment" in lowered or "checking your browser" in lowered:
@@ -158,9 +205,13 @@ def fetch_html() -> str:
 
     if "sign in or register" in lowered or "please enter your details to sign in" in lowered:
         raise RuntimeError(
-            "Got the sign-in page instead of listings — H2S_COOKIE is "
-            "missing, empty, or expired. Re-grab your session cookie from "
-            "DevTools (see README) and update the GitHub secret."
+            "Got the sign-in page instead of listings even with the "
+            "two-call session approach — H2S_COOKIE may genuinely be "
+            "expired, or Holland2Stay may be tying sessions to the "
+            "originating IP address (which would make cookie-reuse from a "
+            "GitHub server fundamentally unworkable here). Re-grab a fresh "
+            "cookie once to rule out simple expiry before assuming the "
+            "IP-binding case."
         )
 
     return html
