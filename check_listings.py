@@ -88,7 +88,7 @@ def parse_cookie_header(header: str):
         cookies.append({
             "name": name.strip(),
             "value": value.strip(),
-            "domain": ".holland2stay.com",
+            "domain": "www.holland2stay.com",
         })
     return cookies
 
@@ -104,8 +104,17 @@ def fetch_html() -> str:
     }
 
     cookie_header = os.environ.get("H2S_COOKIE", "").strip()
-    if cookie_header:
-        payload["cookies"] = parse_cookie_header(cookie_header)
+    parsed_cookies = parse_cookie_header(cookie_header) if cookie_header else []
+    if parsed_cookies:
+        payload["cookies"] = parsed_cookies
+    # Diagnostic — visible in the "Run checker" log, not sent anywhere:
+    # confirms whether the secret is even reaching the script and being
+    # parsed, before we worry about whether Holland2Stay accepts it.
+    print(
+        f"H2S_COOKIE secret present: {bool(cookie_header)}; "
+        f"parsed {len(parsed_cookies)} cookie(s)",
+        file=sys.stderr,
+    )
 
     resp = requests.post(FLARESOLVERR_URL, json=payload, timeout=70)
     resp.raise_for_status()
@@ -140,7 +149,6 @@ def fetch_html() -> str:
         )
 
     return html
-
 
 def parse_listings(html: str):
     """
