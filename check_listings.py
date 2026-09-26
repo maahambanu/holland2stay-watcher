@@ -78,7 +78,13 @@ WATCHED_STREETS = ["galvanistraat"]
 def parse_cookie_header(header: str):
     """Turn a raw 'name=value; name2=value2' cookie header (copied straight
     from your browser's DevTools) into the list-of-dicts format FlareSolverr
-    expects."""
+    expects.
+
+    Deliberately NOT setting a "domain" field: Selenium's add_cookie (which
+    FlareSolverr uses under the hood) is strict about domain matching
+    exactly and throws "unable to set cookie" otherwise. Leaving it unset
+    lets it default to whatever page the browser is already on, which is
+    what we want here."""
     cookies = []
     for part in header.split(";"):
         part = part.strip()
@@ -88,7 +94,6 @@ def parse_cookie_header(header: str):
         cookies.append({
             "name": name.strip(),
             "value": value.strip(),
-            "domain": "www.holland2stay.com",
         })
     return cookies
 
