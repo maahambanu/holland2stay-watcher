@@ -4,7 +4,7 @@ on:
   schedule:
     # GitHub's minimum cron granularity is 5 minutes, and under load
     # actual runs can lag a few minutes behind schedule.
-    - cron: "*/5 * * * *"
+    - cron: "*/2 * * * *"
   workflow_dispatch: {}   # lets you trigger a manual run from the Actions tab
 
 permissions:
